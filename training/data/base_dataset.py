@@ -49,10 +49,16 @@ class BaseDataset(Dataset):
         super().__init__()
         self.img_size = common_conf.img_size 
         self.patch_size = common_conf.patch_size
-        self.aug_scale = common_conf.augs.scales
+        # self.aug_scale = common_conf.augs.scales
+        self.aug_scale = [0.8, 1.2]
         self.rescale = common_conf.rescale
         self.rescale_aug = common_conf.rescale_aug
         self.landscape_check = common_conf.landscape_check 
+
+        if self.rescale:
+            self.process_one_image = self.process_one_image
+        else:
+            self.process_one_image = self.process_one_image_samesize
 
     def __len__(self):
         return self.len_train
@@ -68,6 +74,7 @@ class BaseDataset(Dataset):
             Dataset item as returned by get_data()
         """
         seq_index, img_per_seq, aspect_ratio = idx_N
+        # print("seq_index:", seq_index, "img_per_seq:", img_per_seq, "aspect_ratio:", aspect_ratio)
         return self.get_data(
             seq_index=seq_index, img_per_seq=img_per_seq, aspect_ratio=aspect_ratio
         )
@@ -172,7 +179,6 @@ class BaseDataset(Dataset):
             aug_size = aug_size.astype(np.int32)
         else:
             aug_size = original_size
-
         # Move principal point to the image center and crop if necessary
         image, depth_map, intri_opencv, track = crop_image_depth_and_intrinsic_by_pp(
             image, depth_map, intri_opencv, aug_size, track=track, filepath=filepath,
@@ -204,7 +210,7 @@ class BaseDataset(Dataset):
         image, depth_map, intri_opencv, track = crop_image_depth_and_intrinsic_by_pp(
             image, depth_map, intri_opencv, target_shape, track=track, filepath=filepath, strict=True,
         )
-
+        # print("process track shape:", track.shape if track is not None else "No track")
         # Apply 90-degree rotation if needed
         if rotate_to_portrait:
             assert self.landscape_check
@@ -233,7 +239,75 @@ class BaseDataset(Dataset):
             point_mask,
             track,
         )
+    def process_one_image_samesize(
+        self,
+        image,
+        depth_map,
+        extri_opencv,
+        intri_opencv,
+        original_size,
+        target_image_shape,
+        track=None,
+        filepath=None,
+        safe_bound=4,
+    ):
+        """
+        Process a single image and its associated data.
+        
+        This method handles image transformations, depth processing, and coordinate conversions.
+        
+        Args:
+            image (numpy.ndarray): Input image array
+            depth_map (numpy.ndarray): Depth map array
+            extri_opencv (numpy.ndarray): Extrinsic camera matrix (OpenCV convention)
+            intri_opencv (numpy.ndarray): Intrinsic camera matrix (OpenCV convention)
+            original_size (numpy.ndarray): Original image size [height, width]
+            target_image_shape (numpy.ndarray): Target image shape after processing
+            track (numpy.ndarray, optional): Optional tracking information. Defaults to None.
+            filepath (str, optional): Optional file path for debugging. Defaults to None.
+            safe_bound (int, optional): Safety margin for cropping operations. Defaults to 4.
+            
+        Returns:
+            tuple: (
+                image (numpy.ndarray): Processed image,
+                depth_map (numpy.ndarray): Processed depth map,
+                extri_opencv (numpy.ndarray): Updated extrinsic matrix,
+                intri_opencv (numpy.ndarray): Updated intrinsic matrix,
+                world_coords_points (numpy.ndarray): 3D points in world coordinates,
+                cam_coords_points (numpy.ndarray): 3D points in camera coordinates,
+                point_mask (numpy.ndarray): Boolean mask of valid points,
+                track (numpy.ndarray, optional): Updated tracking information
+            )
+        """
+        # Make copies to avoid in-place operations affecting original data
+        image = np.copy(image)
+        depth_map = np.copy(depth_map)
+        extri_opencv = np.copy(extri_opencv)
+        intri_opencv = np.copy(intri_opencv)
+        if track is not None:
+            track = np.copy(track)
 
+
+        aug_size = original_size
+
+        original_size = np.array(image.shape[:2])  # update original_size
+        target_shape = target_image_shape
+
+        # Convert depth to world and camera coordinates
+        world_coords_points, cam_coords_points, point_mask = (
+            depth_to_world_coords_points(depth_map, extri_opencv, intri_opencv)
+        )
+
+        return (
+            image,
+            depth_map,
+            extri_opencv,
+            intri_opencv,
+            world_coords_points,
+            cam_coords_points,
+            point_mask,
+            track,
+        )
     def get_nearby_ids(self, ids, full_seq_num, expand_ratio=None, expand_range=None):
         """
         TODO: add the function to sample the ids by pose similarity ranking.

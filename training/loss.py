@@ -11,9 +11,41 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from math import ceil, floor
-
+import logging
+logging.getLogger("PIL").setLevel(logging.WARNING)
 from vggt.utils.pose_enc import extri_intri_to_pose_encoding, pose_encoding_to_extri_intri
+from training.metric import camera_to_rel_deg, calculate_auc
 
+# Configure the logging system
+logging.basicConfig(
+    level=logging.DEBUG,  # Set the default logging level
+    format='%(asctime)s - %(levelname)s - %(message)s',  # Log format
+    handlers=[
+        logging.StreamHandler(),  # Output to console
+        # Uncomment the next line to log to a file
+        # logging.FileHandler("debug.log")
+    ]
+)
+
+def huber_loss(y_true, y_pred, delta=1.0):
+    """
+    Compute the Huber loss between y_true and y_pred.
+
+    Args:
+        y_true (torch.Tensor): Ground truth tensor.
+        y_pred (torch.Tensor): Predicted tensor.
+        delta (float): Threshold at which to switch from L2 to L1 loss.
+
+    Returns:
+        torch.Tensor: The computed Huber loss.
+    """
+    residual = torch.abs(y_true - y_pred)
+    loss = torch.where(
+        residual <= delta,
+        0.5 * residual ** 2,  # L2 loss for small residuals
+        delta * (residual - 0.5 * delta)  # L1 loss for large residuals
+    )
+    return loss.mean()
 
 def check_and_fix_inf_nan(loss_tensor, loss_name, hard_max = 100):
     """
@@ -45,23 +77,37 @@ def check_and_fix_inf_nan(loss_tensor, loss_name, hard_max = 100):
 
 def camera_loss(pred_pose_enc_list, batch, loss_type="l1", gamma=0.6, pose_encoding_type="absT_quaR_FoV", weight_T = 1.0, weight_R = 1.0, weight_fl = 0.5, frame_num = -100):
     # Extract predicted and ground truth components
+    # mask_valid: B, S, H, W
     mask_valid = batch['point_masks']
+    # logging.debug(f'mask_valid shape: {mask_valid.shape}')
     
     batch_valid_mask = mask_valid[:, 0].sum(dim=[-1, -2]) > 100
+    # logging.debug(f'batch_valid_mask: {batch_valid_mask}')
+    
     num_predictions = len(pred_pose_enc_list)
+    # logging.debug(f'num_predictions: {num_predictions}')
 
     gt_extrinsic = batch['extrinsics']
     gt_intrinsic = batch['intrinsics']
     image_size_hw = batch['images'].shape[-2:]
+    # logging.debug(f'gt_extrinsic shape: {gt_extrinsic.shape}')
+    # logging.debug(f'gt_intrinsic shape: {gt_intrinsic.shape}')
+    # logging.debug(f'image_size_hw: {image_size_hw}')
+
+    # print('gt_extrinsic', gt_extrinsic.shape)
+    batch_size, seq_len, _, _ = gt_extrinsic.shape
 
     gt_pose_encoding = extri_intri_to_pose_encoding(gt_extrinsic, gt_intrinsic, image_size_hw, pose_encoding_type=pose_encoding_type)
-
+    # print('gt_pose_encoding', gt_pose_encoding.shape)
     loss_T = loss_R = loss_fl = 0
+
+    # logging.debug('num_predictions', num_predictions)
 
     for i in range(num_predictions):
         i_weight = gamma ** (num_predictions - i - 1)
 
         cur_pred_pose_enc = pred_pose_enc_list[i]
+        # print('cur_pred_pose_enc, index:{}'.format(i), cur_pred_pose_enc)
 
         if batch_valid_mask.sum() == 0:
             loss_T_i = (cur_pred_pose_enc * 0).mean()
@@ -71,7 +117,7 @@ def camera_loss(pred_pose_enc_list, batch, loss_type="l1", gamma=0.6, pose_encod
             if frame_num>0:
                 loss_T_i, loss_R_i, loss_fl_i = camera_loss_single(cur_pred_pose_enc[batch_valid_mask][:, :frame_num].clone(), gt_pose_encoding[batch_valid_mask][:, :frame_num].clone(), loss_type=loss_type)
             else:
-                loss_T_i, loss_R_i, loss_fl_i = camera_loss_single(cur_pred_pose_enc[batch_valid_mask].clone(), gt_pose_encoding[batch_valid_mask].clone(), loss_type=loss_type)
+                loss_T_i, loss_R_i, loss_fl_i = camera_loss_single(cur_pred_pose_enc[batch_valid_mask[i]].clone(), gt_pose_encoding[batch_valid_mask[i]].clone(), loss_type=loss_type)
         loss_T += loss_T_i * i_weight
         loss_R += loss_R_i * i_weight
         loss_fl += loss_fl_i * i_weight
@@ -94,8 +140,7 @@ def camera_loss(pred_pose_enc_list, batch, loss_type="l1", gamma=0.6, pose_encod
         last_pred_pose_enc = pred_pose_enc_list[-1]
 
         last_pred_extrinsic, _ = pose_encoding_to_extri_intri(last_pred_pose_enc.detach(), image_size_hw, pose_encoding_type=pose_encoding_type, build_intrinsics=False)
-
-        rel_rangle_deg, rel_tangle_deg = camera_to_rel_deg(last_pred_extrinsic.float(), gt_extrinsic.float(), gt_extrinsic.device)
+        rel_rangle_deg, rel_tangle_deg = camera_to_rel_deg(last_pred_extrinsic.float(), gt_extrinsic.float(), gt_extrinsic.device,batch_size)
 
 
         if rel_rangle_deg.numel() == 0 and rel_tangle_deg.numel() == 0:
@@ -122,6 +167,8 @@ def camera_loss(pred_pose_enc_list, batch, loss_type="l1", gamma=0.6, pose_encod
 
 
 def camera_loss_single(cur_pred_pose_enc, gt_pose_encoding, loss_type="l1"):
+    # print('pred trans:',cur_pred_pose_enc[..., :3])
+    # print('gt trans:', gt_pose_encoding[..., :3])
     if loss_type == "l1":
         loss_T = (cur_pred_pose_enc[..., :3] - gt_pose_encoding[..., :3]).abs()
         loss_R = (cur_pred_pose_enc[..., 3:7] - gt_pose_encoding[..., 3:7]).abs()
@@ -164,6 +211,7 @@ def normalize_pointcloud(pts3d, valid_mask, eps=1e-3):
     # avg_scale = avg_scale.view(-1, 1, 1, 1, 1)
 
     pts3d = pts3d / avg_scale.view(-1, 1, 1, 1, 1)
+    
     return pts3d, avg_scale
 
 
@@ -178,7 +226,7 @@ def depth_loss(depth, depth_conf, batch, gamma=1.0, alpha=0.2, loss_type="conf",
 
     if loss_type == "conf":
         conf_loss_dict = conf_loss(depth, depth_conf, gt_depth, valid_mask,
-                               batch, normalize_pred=False, normalize_gt=False,
+                               batch, normalize_pred=True, normalize_gt=True,
                                gamma=gamma, alpha=alpha, affine_inv=affine_inv, gradient_loss=gradient_loss, valid_range=valid_range, postfix="_depth", disable_conf=disable_conf, all_mean=all_mean)
     else:
         raise ValueError(f"Invalid loss type: {loss_type}")
@@ -288,7 +336,8 @@ def conf_loss(pts3d, pts3d_conf, gt_pts3d, valid_mask,  batch, normalize_gt=True
     else:
         conf_loss_first_frame = pts3d * 0
         conf_loss_other_frames = pts3d * 0
-        print("No valid conf loss", batch["seq_name"])
+        # print("No valid conf loss", batch["seq_name"])
+        print("No valid conf loss")
 
 
     if all_mean and conf_loss_first_frame.numel() > 0 and conf_loss_other_frames.numel() > 0:
@@ -335,7 +384,6 @@ def conf_loss(pts3d, pts3d_conf, gt_pts3d, valid_mask,  batch, normalize_gt=True
 
 
 def reg_loss(pts3d, gt_pts3d, valid_mask, gradient_loss=None):
-
     first_frame_pts3d = pts3d[:, 0:1, ...]
     first_frame_gt_pts3d = gt_pts3d[:, 0:1, ...]
     first_frame_mask = valid_mask[:, 0:1, ...]

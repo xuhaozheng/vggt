@@ -88,7 +88,6 @@ def crop_image_depth_and_intrinsic_by_pp(
     # Identify principal point (cx, cy) from intrinsic
     cx = (intrinsic[1, 2])
     cy = (intrinsic[0, 2])
-
     # Compute how far we can crop in each direction
     if strict:
         half_x = min((target_shape[0] / 2), cx)
@@ -611,6 +610,34 @@ def adjust_track_rot90(track, image_width, image_height, clockwise):
 
     return new_track
 
+def read_image_pil(path: str, rgb: bool = True) -> np.ndarray:
+    """
+    Reads an image from disk using PIL, returning it as an RGB image array (H, W, 3).
+
+    Args:
+        path (str):
+            File path to the image.
+        rgb (bool):
+            If True, convert the image to RGB.
+            If False, leave the image in its original mode.
+
+    Returns:
+        np.ndarray or None:
+            A numpy array of shape (H, W, 3) if successful,
+            or None if the file does not exist or could not be read.
+    """
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        print(f"File does not exist or is empty: {path}")
+        return None
+
+    try:
+        img = Image.open(path)
+        if rgb and img.mode != 'RGB':
+            img = img.convert('RGB')
+        return np.array(img)
+    except Exception as e:
+        print(f"Could not load image={path}. Error: {e}")
+        return None
 
 def read_image_cv2(path: str, rgb: bool = True) -> np.ndarray:
     """
@@ -708,3 +735,121 @@ def load_16big_png_depth(depth_png: str) -> np.ndarray:
             .reshape((depth_pil.size[1], depth_pil.size[0]))
         )
     return depth
+
+def co3d_annotation_to_opencv_pose(R,T,p,f,h,w):
+    # p = entry.viewpoint.principal_point
+    # f = entry.viewpoint.focal_length
+    # h, w = entry.image.size
+    K = np.eye(3)
+    s = (min(h, w) - 1) / 2
+    K[0, 0] = f[0] * (w - 1) / 2
+    K[1, 1] = f[1] * (h - 1) / 2
+    K[0, 2] = -p[0] * s + (w - 1) / 2
+    K[1, 2] = -p[1] * s + (h - 1) / 2
+
+    # R = np.asarray(entry.viewpoint.R).T   # note the transpose here
+    # T = np.asarray(entry.viewpoint.T)
+    pose = np.concatenate([R,T],1)
+    pose = np.diag([-1,-1,1]).astype(np.float32) @ pose # flip the direction of x,y axis
+
+    # "pose" is the extrinsic and "K" is the intrinsic
+    # pose = [R|t]
+    # x_img = K (R @ x_wrd + t)
+    # x_img is in pixel
+
+    return pose, K
+
+def opencv_from_cameras_projection_numpy(R, T, p, f, h, w):
+    """
+    Converts PyTorch3D-style camera parameters to OpenCV-style using NumPy.
+    Based on https://github.com/facebookresearch/pytorch3d/blob/main/pytorch3d/renderer/camera_conversions.py#L64
+    Args:
+        R: Rotation matrix (3, 3).
+        T: Translation vector (3, 1).
+        p: Principal point (2,).
+        f: Focal length (2,).
+        h: Image height (int).
+        w: Image width (int).
+
+    Returns:
+        extrinsics: Camera extrinsic matrix (3, 4).
+        camera_matrix: Intrinsic camera matrix (3, 3).
+    """
+    # Convert PyTorch3D-style to OpenCV-style
+    R_pytorch3d = R.copy()
+    T_pytorch3d = T.copy()
+    focal_pytorch3d = np.array(f)
+    p0_pytorch3d = np.array(p)
+
+    # Flip the x and y axes for OpenCV convention
+    T_pytorch3d[:2] *= -1
+    R_pytorch3d[:, :2] *= -1
+    tvec = T_pytorch3d
+    R = R_pytorch3d.T  # Transpose rotation matrix
+
+    # Combine R and tvec into a single extrinsic matrix
+    extrinsics = np.hstack([R, tvec])  # Shape: (3, 4)
+
+    # Create image_size_wh as a NumPy array
+    image_size_wh = np.array([w, h])  # Shape: (2,)
+
+    # NDC to screen conversion
+    scale = np.min(image_size_wh) / 2.0  # Scalar
+    c0 = image_size_wh / 2.0  # Center of the image
+
+    principal_point = -p0_pytorch3d * scale + c0
+    focal_length = focal_pytorch3d * scale
+
+    # Construct the camera intrinsic matrix
+    camera_matrix = np.zeros((3, 3), dtype=np.float32)
+    camera_matrix[0, 0] = focal_length[0]
+    camera_matrix[1, 1] = focal_length[1]
+    camera_matrix[0, 2] = principal_point[0]
+    camera_matrix[1, 2] = principal_point[1]
+    camera_matrix[2, 2] = 1.0
+
+    return extrinsics, camera_matrix
+
+
+def convert_pt3d_to_opencv(anno, original_size, size_invariant=False):
+    # Convert pt3d extrinsic to opencv
+    rot_pt3d = np.array(anno["R"])
+    trans_pt3d = np.array(anno["T"])
+
+    trans_pt3d[:2] *= -1
+    rot_pt3d[:, :2] *= -1
+    rot_pt3d = rot_pt3d.transpose(1, 0)
+    extri_opencv = np.hstack((rot_pt3d, trans_pt3d[:, None]))
+
+    # Convert pt3d intrinsics to opencv
+    focal_length_pt3d = np.array(anno["focal_length"])
+    principal_point_pt3d = np.array(anno["principal_point"])
+
+    pt3d_scale = original_size.min() / 2.0
+    focal_length_opencv = focal_length_pt3d * pt3d_scale
+    # Use original_size[::-1] because in pytorch3d it uses image_size_wh
+    principal_point_opencv = -principal_point_pt3d * pt3d_scale + original_size[::-1] / 2
+
+    if size_invariant:
+        principal_point_opencv = principal_point_opencv / original_size[::-1]
+        focal_length_opencv = focal_length_opencv / max(original_size)
+
+    intri_opencv = np.eye(3)
+    intri_opencv[:2, 2] = principal_point_opencv
+    intri_opencv[0, 0] = focal_length_opencv[0]
+    intri_opencv[1, 1] = focal_length_opencv[1]
+
+    return extri_opencv, intri_opencv
+
+def imread_cv2(path, options=cv2.IMREAD_COLOR):
+    """ Open an image or a depthmap with opencv-python.
+    From DUST3R
+    """
+    if path.endswith(('.exr', 'EXR')):
+        options = cv2.IMREAD_ANYDEPTH
+    img = cv2.imread(path, options)
+    if img is None:
+        raise IOError(f'Could not load image={path} with {options=}')
+    if img.ndim == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return img

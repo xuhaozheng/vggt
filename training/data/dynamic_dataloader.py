@@ -52,8 +52,8 @@ def build_dynamic_dataloader(
     """
     print("Building dynamic dataloader with seed:", seed)
     
-    # Instantiate the dataset
-    dataset_obj = instantiate(dataset, common_config=common_config, _recursive_=False)
+    # Use dataset object directly
+    dataset_obj = dataset
 
     # Extract aspect ratio and image number ranges from the configuration
     aspect_ratio_range = common_config.aspects  # e.g., [0.5, 1.0]
@@ -72,22 +72,28 @@ def build_dynamic_dataloader(
         aspect_ratio_range, 
         image_num_range, 
         seed=seed,
-        max_img_per_gpu=max_img_per_gpu
+        max_img_per_gpu=max_img_per_gpu,
+        # drop_last=drop_last  # Use the drop_last parameter here
     )
     
     # Set the epoch for the sampler
-    sampler.set_epoch(epoch)
+    if hasattr(sampler, 'set_epoch'):
+        sampler.set_epoch(epoch)
+    
+    # Set the epoch for the dataset if applicable
     if hasattr(dataset_obj, "epoch"):
         dataset_obj.epoch = epoch
     if hasattr(dataset_obj, "set_epoch"):
         dataset_obj.set_epoch(epoch)
 
-    # Create and return the dataloader
+    # Create and return the dataloader - REMOVE shuffle and drop_last from here
     return DataLoader(
         dataset_obj,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        drop_last=drop_last,
+        # Remove these parameters as they conflict with batch_sampler
+        # shuffle=shuffle,
+        # drop_last=drop_last,
         batch_sampler=batch_sampler,
         collate_fn=collate_fn,
         persistent_workers=persistent_workers,
@@ -182,8 +188,9 @@ class DynamicBatchSampler(Sampler):
                 # Calculate batch size based on max images per GPU and current image number
                 batch_size = self.max_img_per_gpu / random_image_num
                 batch_size = np.floor(batch_size).astype(int)
-                batch_size = max(1, batch_size)  # Ensure batch size is at least 1
-
+                # batch_size = max(1, batch_size)  # Ensure batch size is at least 1!!!
+                batch_size = 1
+                # print(f"Epoch {self.epoch}: Using aspect ratio {random_aspect_ratio}, image number {random_image_num}, batch size {batch_size}")
                 # Collect samples for the current batch
                 current_batch = []
                 for _ in range(batch_size):

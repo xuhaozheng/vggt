@@ -15,52 +15,59 @@ import random
 import numpy as np
 
 
-from vggt.training.data.dataset_util import *
-from vggt.training.data.base_dataset import BaseDataset
+# from vggt.training.data.dataset_util import *
+# from vggt.training.data.base_dataset import BaseDataset
 
+from training.data.base_dataset import BaseDataset
+from training.data.dataset_util import *
+from torchvision import transforms as TF
+
+# SEEN_CATEGORIES = [
+#     "apple",
+#     "backpack",
+#     "banana",
+#     "baseballbat",
+#     "baseballglove",
+#     "bench",
+#     "bicycle",
+#     "bottle",
+#     "bowl",
+#     "broccoli",
+#     "cake",
+#     "car",
+#     "carrot",
+#     "cellphone",
+#     "chair",
+#     "cup",
+#     "donut",
+#     "hairdryer",
+#     "handbag",
+#     "hydrant",
+#     "keyboard",
+#     "laptop",
+#     "microwave",
+#     "motorcycle",
+#     "mouse",
+#     "orange",
+#     "parkingmeter",
+#     "pizza",
+#     "plant",
+#     "stopsign",
+#     "teddybear",
+#     "toaster",
+#     "toilet",
+#     "toybus",
+#     "toyplane",
+#     "toytrain",
+#     "toytruck",
+#     "tv",
+#     "umbrella",
+#     "vase",
+#     "wineglass",
+# ]
 
 SEEN_CATEGORIES = [
     "apple",
-    "backpack",
-    "banana",
-    "baseballbat",
-    "baseballglove",
-    "bench",
-    "bicycle",
-    "bottle",
-    "bowl",
-    "broccoli",
-    "cake",
-    "car",
-    "carrot",
-    "cellphone",
-    "chair",
-    "cup",
-    "donut",
-    "hairdryer",
-    "handbag",
-    "hydrant",
-    "keyboard",
-    "laptop",
-    "microwave",
-    "motorcycle",
-    "mouse",
-    "orange",
-    "parkingmeter",
-    "pizza",
-    "plant",
-    "stopsign",
-    "teddybear",
-    "toaster",
-    "toilet",
-    "toybus",
-    "toyplane",
-    "toytrain",
-    "toytruck",
-    "tv",
-    "umbrella",
-    "vase",
-    "wineglass",
 ]
 
 
@@ -97,10 +104,15 @@ class Co3dDataset(BaseDataset):
         self.load_depth = common_conf.load_depth
         self.inside_random = common_conf.inside_random
 
+        self.to_tensor = TF.ToTensor()
+
         if CO3D_DIR is None or CO3D_ANNOTATION_DIR is None:
             raise ValueError("Both CO3D_DIR and CO3D_ANNOTATION_DIR must be specified.")
 
         category = sorted(SEEN_CATEGORIES)
+
+        self.duplicate_img = False
+        self.mask_depth = True
 
         if split == "train":
             split_name_list = ["train"]
@@ -205,6 +217,7 @@ class Co3dDataset(BaseDataset):
 
         for anno in annos:
             filepath = anno["filepath"]
+            # print('filepath',filepath)
 
             image_path = osp.join(self.CO3D_DIR, filepath)
             image = read_image_cv2(image_path)
@@ -225,10 +238,41 @@ class Co3dDataset(BaseDataset):
                 )
             else:
                 depth_map = None
+            # print('anno',anno)
+            vggt_style = True
+            if vggt_style:
+                '''
+                VGGT original pose conversion
+                '''
+                original_size = np.array(image.shape[:2])
+                # print('before R',anno['R'])
+                # print('T',anno['T'])
+                # print('focal_length',anno['focal_length'])
+                # print('principal_point',anno['principal_point'])
+                extri_opencv, intri_opencv = convert_pt3d_to_opencv(anno, original_size)
+                # print('after extri_opencv',extri_opencv)
+                # print('after intri_opencv',intri_opencv)
+            else:
+                '''
+                Adapted from pytorch3d
+                '''
+                original_size = np.array(image.shape[:2])
+                h,w,_ = image.shape
 
-            original_size = np.array(image.shape[:2])
-            extri_opencv = np.array(anno["extri"])
-            intri_opencv = np.array(anno["intri"])
+                R = np.array(anno['R'])  # Rotation matrix (3x3)
+                T = np.array(anno['T']).reshape(3, 1)  # Translation vector (3x1)
+                focal_length = anno['focal_length']
+                principal_point = anno['principal_point']
+                print('before R',R)
+                print('T',T)
+                print('focal_length',focal_length)
+                print('principal_point',principal_point)
+                extri_opencv, intri_opencv = opencv_from_cameras_projection_numpy(R, T, principal_point, focal_length, h, w)
+                print('after extri_opencv',extri_opencv)
+                print('after intri_opencv',intri_opencv)
+
+
+
 
             (
                 image,
@@ -248,6 +292,9 @@ class Co3dDataset(BaseDataset):
                 target_image_shape,
                 filepath=filepath,
             )
+            
+            image = image/255.0
+            image = image.astype(np.float32)
 
             images.append(image)
             depths.append(depth_map)
@@ -273,5 +320,6 @@ class Co3dDataset(BaseDataset):
             "world_points": world_points,
             "point_masks": point_masks,
             "original_sizes": original_sizes,
+            "image_paths": image_paths,
         }
         return batch

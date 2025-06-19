@@ -10,6 +10,7 @@ from PIL import Image
 import cv2
 import requests
 import tempfile
+torch.set_printoptions(sci_mode=False)
 
 sys.path.append("vggt/")
 
@@ -62,6 +63,7 @@ def process_images(image_dir, model, device):
     extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
     predictions["extrinsic"] = extrinsic
     predictions["intrinsic"] = intrinsic
+    print('extrinsic',extrinsic)
 
     for key in predictions.keys():
         if isinstance(predictions[key], torch.Tensor):

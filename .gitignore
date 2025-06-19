@@ -1,3 +1,16 @@
+# --- Directories to Ignore ---
+# Outputs from experiments, logs, and builds
+colmap_output/
+runs/
+test_code/
+test_mvs.py
+test_opflow.py
+test_opflow_accumulate.py
+test_reconstruct.py
+train.py
+train_testload.py
+vis/
+
 .hydra/
 output/
 ckpt/
